@@ -1,6 +1,6 @@
 # Shopping Sessions
 
-This repository builds an amd64 Docker image for the Builders Shopping Sessions track. The current implementation is adapted from [Team Xero's MIT-licensed entry](https://github.com/arnabxero/xero-shopping-sessions), commit `2d5a40b`. Their copyright and license are preserved in [LICENSE](LICENSE). The previous implementation remains in this repository's Git history.
+This repository builds an amd64 Docker image for the Builders Shopping Sessions track.
 
 The pipeline parses compact event records, partitions them by event ID for deduplication, routes survivors by person, and processes person partitions in parallel. It writes multiple Parquet parts. The Docker build targets x86-64-v3; the scorer CPU must support that instruction set.
 
