@@ -15,6 +15,7 @@ Machine: Apple Silicon Mac, 24 GiB physical memory, macOS. Release Rust 1.85. Th
 | parallel event reduction | same | 24.57 s | 4.07 GiB | exact equality with previous output |
 | parallel reduction and file-order validation | same | 19.44 s | 4.58 GiB | exact equality with baseline |
 | compact event/user IDs, fixed-width timestamps, packed event sort | seed 3, 20M events, 5M clicks | 15.49 s | 4.53 GiB | exact equality with prior 20M output; all fixtures pass |
+| staged parallel parse/reduction, compact click IDs, streaming session state | seed 3, 20M events, 5M clicks | 3.31 s warm local best | 4.53 GiB | exact equality with prior 20M output; all native and Linux/AMD64 fixtures pass |
 | serial reduction, faster hash and parallel sort | seed 4, 60M events, 15M clicks | 172.11 s | 9.26 GiB | output totals/invariants; baseline for comparison |
 | parallel reduction, unordered validation | same | 236.49 s | 7.36 GiB | exact equality of all output rows with serial run |
 | parallel reduction, file-order validation | same | 159.50 s | 7.86 GiB | exact equality of all output rows with serial run |
@@ -26,4 +27,6 @@ The 60M run with parallel reduction was slower overall despite faster deduplicat
 Correctness as of this log: all 36 fixtures and the 1M published answers pass both natively and in the linux/amd64 baseline image. A separate Python reference matched five 10k-event seeds. The 60M generated seed has no independent official expected output; comparisons are between implementations and invariants.
 
 The latest 20M timing ran with warm input pages, so it is useful for rejecting regressions but is not comparable to earlier cold or contended local timings. The change is deliberately confined to measured hot paths: compact keys avoid repeated byte hashing for generated IDs while retaining exact byte-string fallbacks, timestamp parsing avoids generic iterator overhead for fixed-width ISO forms, and event sorting uses one packed comparison only when the input window and person count fit its proven bounds. The generated 20M output is exactly equal to the prior implementation's logical Parquet tables.
+
+The latest implementation profiles the stages separately. On a warm, otherwise idle local run the remaining work was distributed across event reduction and identity interning, click reduction, session aggregation, catalog/link loading, and Parquet writing; no single stage dominated after the staged parallel passes. Later repeated runs varied substantially with desktop load and page-cache state, including slower than prior observations. A sub-two-second score cannot be inferred from these local measurements. Reaching that target would require replacing the remaining general-purpose maps and Parquet writer with a scorer-specialized low-level engine, then measuring it on comparable Linux hardware.
 

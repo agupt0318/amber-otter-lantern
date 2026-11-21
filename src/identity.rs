@@ -67,9 +67,22 @@ impl People {
         }
     }
 
-    pub fn resolve(&mut self, id: &str) -> usize {
-        let id = self.intern(id);
-        self.root(id)
+    /// Resolves an ID after the caller has interned every ID it will query.
+    /// This read-only form is safe to use from parallel event materialization.
+    pub fn resolve_known(&self, id: &str) -> Option<usize> {
+        let index = if let Some(key) = packed_id(id.as_bytes()) {
+            *self.packed_ids.get(&key)?
+        } else {
+            *self.other_ids.get(id)?
+        };
+        Some(self.root_readonly(index))
+    }
+
+    fn root_readonly(&self, mut index: usize) -> usize {
+        while self.parent[index] != index {
+            index = self.parent[index];
+        }
+        index
     }
 
     pub fn canonical(&mut self, id: usize) -> &str {
@@ -81,7 +94,7 @@ impl People {
 /// Losslessly packs the common generator IDs (one prefix byte plus up to nine
 /// lowercase base-36 bytes). Anything else stays in the exact string table.
 #[inline]
-fn packed_id(id: &[u8]) -> Option<u64> {
+pub(crate) fn packed_id(id: &[u8]) -> Option<u64> {
     if id.len() < 2 || id.len() > 10 {
         return None;
     }
@@ -106,9 +119,9 @@ mod tests {
         p.link("z", "b");
         p.link("b", "A");
         p.link("z", "b");
-        let z = p.resolve("z");
+        let z = p.intern("z");
         assert_eq!(p.canonical(z), "A");
-        let a = p.resolve("a");
+        let a = p.intern("a");
         assert_ne!(z, a);
         assert_eq!(p.canonical(a), "a");
     }
@@ -116,10 +129,10 @@ mod tests {
     #[test]
     fn compact_user_ids_do_not_merge_distinct_spellings() {
         let mut p = People::default();
-        let a = p.resolve("u1");
-        let b = p.resolve("u01");
-        let c = p.resolve("U1");
-        let d = p.resolve("u-1");
+        let a = p.intern("u1");
+        let b = p.intern("u01");
+        let c = p.intern("U1");
+        let d = p.intern("u-1");
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
