@@ -1,0 +1,90 @@
+use crate::{parse, Candidate};
+use hashbrown::{DefaultHashBuilder, HashMap};
+use rayon::prelude::*;
+use std::{hash::BuildHasher, sync::Mutex};
+
+/// Experimental sharded reduction. Each CSV row belongs to exactly one chunk,
+/// even if it spans a chunk boundary.
+#[allow(clippy::needless_lifetimes)] // The batch-flush closure names the mapping lifetime.
+pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<&'a [u8], Candidate>> {
+    const SHARDS: usize = 64;
+    const CHUNK: usize = 2 * 1024 * 1024;
+    const BATCH: usize = 256;
+    let shards: Vec<Mutex<HashMap<&[u8], Candidate>>> =
+        (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
+    let hash = DefaultHashBuilder::default();
+    let mut tasks = Vec::new();
+    for (file, map) in maps.iter().enumerate() {
+        if let Some(map) = map {
+            for start in (0..map.len()).step_by(CHUNK) {
+                tasks.push((file, start, (start + CHUNK).min(map.len())));
+            }
+        }
+    }
+    tasks.par_iter().for_each(|&(file, start, end)| {
+        let map = maps[file].as_ref().unwrap();
+        let mut offset = start;
+        if start > 0 {
+            while offset < map.len() && map[offset - 1] != b'\n' {
+                offset += 1;
+            }
+        } else {
+            while offset < map.len() && map[offset] != b'\n' {
+                offset += 1;
+            }
+            offset = (offset + 1).min(map.len());
+        }
+        let mut buffers: Vec<Vec<(&[u8], Candidate)>> = (0..SHARDS).map(|_| Vec::new()).collect();
+        let flush = |shard: usize, buffer: &mut Vec<(&'a [u8], Candidate)>| {
+            let mut table = shards[shard].lock().unwrap();
+            for (id, candidate) in buffer.drain(..) {
+                if table
+                    .get(id)
+                    .is_some_and(|old| old.ingest <= candidate.ingest)
+                {
+                    continue;
+                }
+                table.insert(id, candidate);
+            }
+        };
+        while offset < end {
+            let begin = offset;
+            while offset < map.len() && map[offset] != b'\n' {
+                offset += 1;
+            }
+            let line = &map[begin..offset];
+            offset = (offset + 1).min(map.len());
+            let Some(row) = parse::fields::<7>(line) else {
+                continue;
+            };
+            if row[0].is_empty() {
+                continue;
+            }
+            let Some(ingest) = parse::timestamp(row[3]) else {
+                continue;
+            };
+            let shard = (hash.hash_one(row[0]) as usize) % SHARDS;
+            buffers[shard].push((
+                row[0],
+                Candidate {
+                    ingest,
+                    file,
+                    offset: begin,
+                    len: line.len(),
+                },
+            ));
+            if buffers[shard].len() >= BATCH {
+                flush(shard, &mut buffers[shard]);
+            }
+        }
+        for (shard, buffer) in buffers.iter_mut().enumerate() {
+            if !buffer.is_empty() {
+                flush(shard, buffer);
+            }
+        }
+    });
+    shards
+        .into_iter()
+        .map(|shard| shard.into_inner().unwrap())
+        .collect()
+}

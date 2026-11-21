@@ -1,0 +1,2 @@
+# Fixture bytes, including deliberately embedded carriage returns, are test data.
+fixtures/** -text
