@@ -58,3 +58,7 @@ The current measured stage distribution on the retained 20M run was: catalogs an
 
 Events and clicks are already grouped by person before sessionization. The latest change splits the event array only at person boundaries, processes those ranges on the eight workers, and sums the small campaign/day maps. It keeps the serial path for fewer than 100,000 events. Against the immediately preceding published build, alternating 20M runs were 8.760 vs 6.323 s and 7.493 vs 7.187 s (published vs parallel). On one run the session stage fell from 0.885 to 0.260 s. The 60M case completed with a 10.2 GiB peak memory footprint; its outputs matched both baseline tables exactly. Its wall time of 43.99 s was during heavy desktop contention and is not comparable to the earlier 30.01 s run. All 36 fixtures still pass.
 
+## Private event tables
+
+Event parsing now batches candidates by key into shared staging vectors; each partition is then reduced by a single worker in a private table. Newline scanning uses memchr. In three alternating warm 20M comparisons against the scanning-only version, dedup took 0.551/0.569/0.611 s before and 0.433/0.440/0.499 s after. Whole runs were 2.802/2.862/3.613 s before and 2.643/4.329/3.688 s after, so the total benefit is inconclusive under varying desktop load. Both 20M and 60M tables match the prior reference, and all 36 fixtures pass. The 60M run took 23.14 s locally with a 10.1 GB peak footprint; it is not an official score or a controlled comparison. Equal-ingest copies are specified as identical in rules.md.
+

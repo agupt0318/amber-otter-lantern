@@ -10,8 +10,8 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<EventKey<'a>
     const SHARDS: usize = 64;
     const CHUNK: usize = 2 * 1024 * 1024;
     const BATCH: usize = 256;
-    let shards: Vec<Mutex<HashMap<EventKey<'a>, Candidate>>> =
-        (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
+    let shards: Vec<Mutex<Vec<(EventKey<'a>, Candidate)>>> =
+        (0..SHARDS).map(|_| Mutex::new(Vec::new())).collect();
     let hash = DefaultHashBuilder::default();
     let mut tasks = Vec::new();
     for (file, map) in maps.iter().enumerate() {
@@ -29,33 +29,17 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<EventKey<'a>
                 offset += 1;
             }
         } else {
-            while offset < map.len() && map[offset] != b'\n' {
-                offset += 1;
-            }
+            offset += memchr::memchr(b'\n', &map[offset..]).unwrap_or(map.len() - offset);
             offset = (offset + 1).min(map.len());
         }
         let mut buffers: Vec<Vec<(EventKey<'_>, Candidate)>> =
             (0..SHARDS).map(|_| Vec::new()).collect();
         let flush = |shard: usize, buffer: &mut Vec<(EventKey<'a>, Candidate)>| {
-            let mut table = shards[shard].lock().unwrap();
-            for (id, candidate) in buffer.drain(..) {
-                match table.entry(id) {
-                    hashbrown::hash_map::Entry::Occupied(mut entry) => {
-                        if candidate.ingest < entry.get().ingest {
-                            entry.insert(candidate);
-                        }
-                    }
-                    hashbrown::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(candidate);
-                    }
-                }
-            }
+            shards[shard].lock().unwrap().append(buffer);
         };
         while offset < end {
             let begin = offset;
-            while offset < map.len() && map[offset] != b'\n' {
-                offset += 1;
-            }
+            offset += memchr::memchr(b'\n', &map[offset..]).unwrap_or(map.len() - offset);
             let line = &map[begin..offset];
             offset = (offset + 1).min(map.len());
             let Some(row) = parse::fields::<7>(line) else {
@@ -89,7 +73,23 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<EventKey<'a>
         }
     });
     shards
-        .into_iter()
-        .map(|shard| shard.into_inner().unwrap())
+        .into_par_iter()
+        .map(|shard| {
+            let rows = shard.into_inner().unwrap();
+            let mut table: HashMap<EventKey<'a>, Candidate> = HashMap::with_capacity(rows.len());
+            for (id, candidate) in rows {
+                match table.entry(id) {
+                    hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                        if candidate.ingest < entry.get().ingest {
+                            entry.insert(candidate);
+                        }
+                    }
+                    hashbrown::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(candidate);
+                    }
+                }
+            }
+            table
+        })
         .collect()
 }

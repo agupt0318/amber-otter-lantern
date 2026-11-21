@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 hashbrown = "0.15"
 memmap2 = "0.9"
+memchr = "2"
 parquet = { version = "53", default-features = false }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
