@@ -386,18 +386,23 @@ fn output(path: &Path, schema: &str, columns: Vec<Col>) -> Result<()> {
         let mut w = group.next_column()?.ok_or("missing column")?;
         match col {
             Col::Str(v) => {
-                let vals: Vec<ByteArray> = v.iter().map(|x| ByteArray::from(x.as_str())).collect();
-                w.typed::<ByteArrayType>().write_batch(&vals, None, None)?;
+                for chunk in v.chunks(65_536) {
+                    let vals: Vec<ByteArray> =
+                        chunk.iter().map(|x| ByteArray::from(x.as_str())).collect();
+                    w.typed::<ByteArrayType>().write_batch(&vals, None, None)?;
+                }
             }
             Col::Opt(v) => {
-                let defs: Vec<i16> = v.iter().map(|x| i16::from(x.is_some())).collect();
-                let vals: Vec<ByteArray> = v
-                    .iter()
-                    .filter_map(|x| x.as_ref())
-                    .map(|x| ByteArray::from(x.as_str()))
-                    .collect();
-                w.typed::<ByteArrayType>()
-                    .write_batch(&vals, Some(&defs), None)?;
+                for chunk in v.chunks(65_536) {
+                    let defs: Vec<i16> = chunk.iter().map(|x| i16::from(x.is_some())).collect();
+                    let vals: Vec<ByteArray> = chunk
+                        .iter()
+                        .filter_map(|x| x.as_ref())
+                        .map(|x| ByteArray::from(x.as_str()))
+                        .collect();
+                    w.typed::<ByteArrayType>()
+                        .write_batch(&vals, Some(&defs), None)?;
+                }
             }
             Col::I64(v) => {
                 w.typed::<Int64Type>().write_batch(&v, None, None)?;

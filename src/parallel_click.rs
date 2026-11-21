@@ -42,9 +42,7 @@ pub fn reduce<'a>(
                     offset += 1;
                 }
             } else {
-                while offset < map.len() && map[offset] != b'\n' {
-                    offset += 1;
-                }
+                offset += memchr::memchr(b'\n', &map[offset..]).unwrap_or(map.len() - offset);
                 offset = (offset + 1).min(map.len());
             }
             let mut buffers: Vec<Vec<(ClickId, Candidate<'a>)>> =
@@ -62,9 +60,7 @@ pub fn reduce<'a>(
             };
             while offset < end_offset {
                 let begin = offset;
-                while offset < map.len() && map[offset] != b'\n' {
-                    offset += 1;
-                }
+                offset += memchr::memchr(b'\n', &map[offset..]).unwrap_or(map.len() - offset);
                 let line = &map[begin..offset];
                 offset = (offset + 1).min(map.len());
                 let Some(row) = parse::fields::<4>(line) else {
