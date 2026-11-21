@@ -1,4 +1,5 @@
 use hashbrown::HashMap;
+const DIRECT: usize = 1usize << (usize::BITS - 1);
 
 /// Exact, case-sensitive ID interning with component minima independent of root.
 #[derive(Default)]
@@ -12,10 +13,6 @@ pub struct People {
 }
 
 impl People {
-    pub fn len(&self) -> usize {
-        self.names.len()
-    }
-
     pub fn intern(&mut self, id: &str) -> usize {
         if let Some(key) = packed_id(id.as_bytes()) {
             if let Some(&index) = self.packed_ids.get(&key) {
@@ -71,11 +68,35 @@ impl People {
     /// This read-only form is safe to use from parallel event materialization.
     pub fn resolve_known(&self, id: &str) -> Option<usize> {
         let index = if let Some(key) = packed_id(id.as_bytes()) {
-            *self.packed_ids.get(&key)?
+            match self.packed_ids.get(&key) {
+                Some(&index) => index,
+                None => return Some(DIRECT | key as usize),
+            }
         } else {
             *self.other_ids.get(id)?
         };
         Some(self.root_readonly(index))
+    }
+
+    pub fn output_name(&mut self, id: usize) -> String {
+        if id & DIRECT == 0 {
+            return self.canonical(id).to_string();
+        }
+        let key = (id & !DIRECT) as u64;
+        let mut value = key >> 8;
+        let mut name = vec![];
+        while value > 1 {
+            let digit = (value % 37) as u8 - 1;
+            name.push(if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            });
+            value /= 37;
+        }
+        name.push(key as u8);
+        name.reverse();
+        String::from_utf8(name).expect("packed user ID came from UTF-8 input")
     }
 
     fn root_readonly(&self, mut index: usize) -> usize {
@@ -136,5 +157,17 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
+    }
+
+    #[test]
+    fn direct_ids_round_trip_and_linked_ids_use_the_component_name() {
+        let mut p = People::default();
+        for name in ["u1", "u01", "U1", "uzzzzzzzzz"] {
+            let id = p.resolve_known(name).unwrap();
+            assert_eq!(p.output_name(id), name);
+        }
+        p.link("u1", "a0");
+        let id = p.resolve_known("u1").unwrap();
+        assert_eq!(p.output_name(id), "a0");
     }
 }

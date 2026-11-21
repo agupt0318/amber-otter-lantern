@@ -4,7 +4,7 @@ Record complete-run experiments here. Each entry must include source commit, bui
 
 ## Local observations, November 20, 2026
 
-Machine: Apple Silicon Mac, 24 GiB physical memory, macOS. Release Rust 1.85. These are exploratory single runs and are not scorer timings. No official score has been obtained.
+Machine: Apple Silicon Mac, 24 GiB physical memory, macOS. Release Rust 1.85. These are exploratory single runs and are not scorer timings. An earlier published build scored 10.55 s officially; this newer build has no official score yet.
 
 | Variant | Dataset | Wall | Peak RSS | Verification |
 | --- | --- | --- | --- | --- |
@@ -29,4 +29,28 @@ Correctness as of this log: all 36 fixtures and the 1M published answers pass bo
 The latest 20M timing ran with warm input pages, so it is useful for rejecting regressions but is not comparable to earlier cold or contended local timings. The change is deliberately confined to measured hot paths: compact keys avoid repeated byte hashing for generated IDs while retaining exact byte-string fallbacks, timestamp parsing avoids generic iterator overhead for fixed-width ISO forms, and event sorting uses one packed comparison only when the input window and person count fit its proven bounds. The generated 20M output is exactly equal to the prior implementation's logical Parquet tables.
 
 The latest implementation profiles the stages separately. On a warm, otherwise idle local run the remaining work was distributed across event reduction and identity interning, click reduction, session aggregation, catalog/link loading, and Parquet writing; no single stage dominated after the staged parallel passes. Later repeated runs varied substantially with desktop load and page-cache state, including slower than prior observations. A sub-two-second score cannot be inferred from these local measurements. Reaching that target would require replacing the remaining general-purpose maps and Parquet writer with a scorer-specialized low-level engine, then measuring it on comparable Linux hardware.
+
+## Measured optimization pass, November 20, 2026
+
+The previous published commit is `227447a`. The 20M practice input has 1.6 GiB of events and 232 MiB of clicks. All measurements below are full runs on the same Apple Silicon Mac; they vary with background load and page cache. The official score for the previous commit was 10.55 s, but no official score exists yet for this change.
+
+| Change or comparison | 20M wall time | Evidence |
+| --- | ---: | --- |
+| Previous commit, alternating comparison | 4.746, 7.660 s | Same warmed input, each followed by a changed build |
+| Cached decoded payload in every dedup candidate | 7.700, 8.669 s | Slower in both alternating comparisons; reverted |
+| Previous commit, second alternating comparison | 3.637, 8.228 s | Same warmed input, each followed by the retained build |
+| Compact direct user IDs, borrowed click users, plain Parquet | 3.425, 5.862 s | Faster in both comparisons; retained |
+| Retained build with stage metrics | 4.40 s; 4.66 GiB peak RSS | 36/36 fixtures and exact 20M output-table equality |
+
+The cached-payload trial completed a 60M run in 34.54 s with 14.9 GiB peak memory footprint and exact output-table equality, but that result is not attributable to the final implementation because the trial was reverted. The retained build completed the same 60M input in 30.01 s with 10.4 GiB peak memory footprint and exact equality of both output tables against the earlier reference. This is a local result, not a scorer prediction. The retained changes preserve the baseline event dedup and file-order validation. They avoid interning ordinary unlinked base-36 users and avoid copying retained click user strings. Parquet dictionary construction and statistics are disabled; this cut one local output stage from 0.38 to 0.29 s, while increasing the 20M output from 35 MiB to 94 MiB. The scorer's output disk may change that tradeoff.
+
+### Outside techniques reviewed and next measurements
+
+* [Speed Demon track C](https://github.com/LippInc/speed-demon-2026/tree/main/track-c) uses owner-based hash partitions with batches and private tables. Our 64 locked shards are a close but not identical design. A private-owner prototype is the clearest next dedup experiment, with exact event IDs and the scorer's 24 GiB limit checked before adoption.
+* [Global Hash Tables Strike Back](https://www.vldb.org/pvldb/vol19/p523-marcus.pdf) shows that a tuned shared group-by table can match partitioned aggregation; partitioning is not automatically faster. Benchmark both designs on the generated 20M and 60M distributions rather than assuming one wins.
+* [simd-csv](https://docs.rs/simd-csv/latest/simd_csv/) and [simdcsv](https://github.com/minio/simdcsv) show SIMD and hybrid scanning approaches. Our restricted CSV dialect and fixed field counts make a specialized delimiter scanner a plausible experiment. It must preserve quote and malformed-row semantics on all fixtures.
+* [Parquet format](https://github.com/apache/parquet-format) permits plain, uncompressed pages. The current writer still materializes whole output columns and uses the general-purpose Parquet library; a bounded direct writer may save CPU and peak memory, but needs independent reader validation.
+* [Polars hash-table changes](https://github.com/pola-rs/polars/releases) include blocked prefetch and key-table layout work. A dedicated packed-ID table could reduce the remaining random accesses, but needs a measured advantage over `hashbrown` and exact fallback keys.
+
+The current measured stage distribution on the retained 20M run was: catalogs and links 0.406 s; event dedup 0.678 s; candidate ordering 0.250 s; validation 0.401 s; user interning and resolution 0.306 s; event sorting 0.145 s; click pipeline 0.642 s; sessionization 0.885 s; output 0.606 s. Future work should prioritize sessionization and event dedup, then test whether output page writing or catalog/link processing can be made cheaper. Language changes alone do not remove these data movement costs.
 

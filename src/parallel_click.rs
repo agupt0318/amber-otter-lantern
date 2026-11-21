@@ -3,25 +3,25 @@ use hashbrown::{DefaultHashBuilder, HashMap};
 use rayon::prelude::*;
 use std::{hash::BuildHasher, sync::Mutex};
 
-struct Candidate {
+struct Candidate<'a> {
     file: usize,
     offset: usize,
-    click: PendingClick,
+    click: PendingClick<'a>,
 }
 
 /// Keeps the first valid click in sorted-file, byte-offset order while parsing
 /// independent file chunks in parallel.
-pub fn reduce(
-    maps: &[Option<memmap2::Mmap>],
+pub fn reduce<'a>(
+    maps: &'a [Option<memmap2::Mmap>],
     start: i64,
     end: i64,
     campaigns: &HashMap<String, usize>,
     campaign_ids: &[usize],
-) -> Vec<HashMap<ClickId, PendingClick>> {
+) -> Vec<HashMap<ClickId, PendingClick<'a>>> {
     const SHARDS: usize = 64;
     const CHUNK: usize = 2 * 1024 * 1024;
     const BATCH: usize = 256;
-    let shards: Vec<Mutex<HashMap<ClickId, Candidate>>> =
+    let shards: Vec<Mutex<HashMap<ClickId, Candidate<'a>>>> =
         (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
     let hash = DefaultHashBuilder::default();
     let mut tasks = vec![];
@@ -47,9 +47,9 @@ pub fn reduce(
                 }
                 offset = (offset + 1).min(map.len());
             }
-            let mut buffers: Vec<Vec<(ClickId, Candidate)>> =
+            let mut buffers: Vec<Vec<(ClickId, Candidate<'a>)>> =
                 (0..SHARDS).map(|_| Vec::new()).collect();
-            let flush = |shard: usize, buffer: &mut Vec<(ClickId, Candidate)>| {
+            let flush = |shard: usize, buffer: &mut Vec<(ClickId, Candidate<'a>)>| {
                 let mut table = shards[shard].lock().unwrap();
                 for (id, candidate) in buffer.drain(..) {
                     if table.get(&id).is_some_and(|old| {
@@ -102,11 +102,7 @@ pub fn reduce(
                     Candidate {
                         file,
                         offset: begin,
-                        click: PendingClick {
-                            user: user.to_owned(),
-                            ts,
-                            campaign,
-                        },
+                        click: PendingClick { user, ts, campaign },
                     },
                 ));
                 if buffers[shard].len() >= BATCH {

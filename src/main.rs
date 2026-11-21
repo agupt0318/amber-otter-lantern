@@ -7,7 +7,10 @@ use identity::People;
 use parquet::{
     basic::Compression,
     data_type::{ByteArray, ByteArrayType, Int32Type, Int64Type},
-    file::{properties::WriterProperties, writer::SerializedFileWriter},
+    file::{
+        properties::{EnabledStatistics, WriterProperties},
+        writer::SerializedFileWriter,
+    },
     schema::parser::parse_message_type,
 };
 use rayon::prelude::*;
@@ -187,13 +190,12 @@ impl PartialOrd for ClickId {
         Some(self.cmp(other))
     }
 }
-pub(crate) struct PendingClick {
-    pub(crate) user: String,
+pub(crate) struct PendingClick<'a> {
+    pub(crate) user: &'a str,
     pub(crate) ts: i64,
     pub(crate) campaign: usize,
 }
 struct MissingUsers<'a> {
-    packed: HashMap<u64, &'a str>,
     other: Vec<&'a str>,
 }
 #[derive(Default)]
@@ -250,58 +252,38 @@ fn intern_event_users(people: &mut People, pending: &[PendingEvent<'_>]) {
     let missing: Vec<_> = pending
         .par_chunks(65_536)
         .map(|rows| {
-            let mut missing = MissingUsers {
-                packed: HashMap::new(),
-                other: vec![],
-            };
+            let mut missing = MissingUsers { other: vec![] };
             for row in rows {
                 if people.resolve_known(row.user).is_some() {
                     continue;
                 }
-                if let Some(key) = identity::packed_id(row.user.as_bytes()) {
-                    missing.packed.entry(key).or_insert(row.user);
-                } else {
-                    missing.other.push(row.user);
-                }
+                missing.other.push(row.user);
             }
             missing
         })
         .collect();
     for missing in missing {
-        for (_, user) in missing.packed {
-            people.intern(user);
-        }
         for user in missing.other {
             people.intern(user);
         }
     }
 }
 
-fn intern_click_users(people: &mut People, pending: &[(ClickId, PendingClick)]) {
+fn intern_click_users(people: &mut People, pending: &[(ClickId, PendingClick<'_>)]) {
     let missing: Vec<_> = pending
         .par_chunks(65_536)
         .map(|rows| {
-            let mut missing = MissingUsers {
-                packed: HashMap::new(),
-                other: vec![],
-            };
+            let mut missing = MissingUsers { other: vec![] };
             for (_, row) in rows {
-                if people.resolve_known(&row.user).is_some() {
+                if people.resolve_known(row.user).is_some() {
                     continue;
                 }
-                if let Some(key) = identity::packed_id(row.user.as_bytes()) {
-                    missing.packed.entry(key).or_insert(&row.user);
-                } else {
-                    missing.other.push(&row.user);
-                }
+                missing.other.push(row.user);
             }
             missing
         })
         .collect();
     for missing in missing {
-        for (_, user) in missing.packed {
-            people.intern(user);
-        }
         for user in missing.other {
             people.intern(user);
         }
@@ -314,6 +296,8 @@ fn output(path: &Path, schema: &str, columns: Vec<Col>) -> Result<()> {
     let props = Arc::new(
         WriterProperties::builder()
             .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .set_statistics_enabled(EnabledStatistics::None)
             .build(),
     );
     let mut writer = SerializedFileWriter::new(file, Arc::new(parse_message_type(schema)?), props)?;
@@ -552,11 +536,7 @@ fn run() -> Result<()> {
     stage!("event identity resolution");
     drop(candidates);
     drop(maps);
-    if end - start <= i64::from(u32::MAX) && people.len() <= u32::MAX as usize {
-        events.par_sort_unstable_by_key(|e| ((e.person as u64) << 32) | (e.ts - start) as u64);
-    } else {
-        events.par_sort_unstable_by_key(|e| (e.person, e.ts));
-    }
+    events.par_sort_unstable_by_key(|e| (e.person, e.ts));
     stage!("event sorting");
     let click_files = files(&data.join("clicks"))?;
     let mut click_maps = Vec::with_capacity(click_files.len());
@@ -580,7 +560,7 @@ fn run() -> Result<()> {
         .into_par_iter()
         .map(|(id, click)| Click {
             person: people
-                .resolve_known(&click.user)
+                .resolve_known(click.user)
                 .expect("all pending users were interned"),
             ts: click.ts,
             campaign: click.campaign,
@@ -669,7 +649,7 @@ fn run() -> Result<()> {
     let (mut un, mut ud, mut us, mut ue, mut ur, mut ut) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
     for ((person, day), v) in users {
-        un.push(people.canonical(person).to_string());
+        un.push(people.output_name(person));
         ud.push(day);
         us.push(v.sessions);
         ue.push(v.events);
