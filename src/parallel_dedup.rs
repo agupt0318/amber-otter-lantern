@@ -39,13 +39,16 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<EventKey<'a>
         let flush = |shard: usize, buffer: &mut Vec<(EventKey<'a>, Candidate)>| {
             let mut table = shards[shard].lock().unwrap();
             for (id, candidate) in buffer.drain(..) {
-                if table
-                    .get(&id)
-                    .is_some_and(|old| old.ingest <= candidate.ingest)
-                {
-                    continue;
+                match table.entry(id) {
+                    hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                        if candidate.ingest < entry.get().ingest {
+                            entry.insert(candidate);
+                        }
+                    }
+                    hashbrown::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(candidate);
+                    }
                 }
-                table.insert(id, candidate);
             }
         };
         while offset < end {
