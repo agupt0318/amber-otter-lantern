@@ -28,5 +28,5 @@ Build the scorer-platform image with `docker buildx build --platform linux/amd64
 
 ## Performance status
 
-The program is a correctness-first native implementation. See `PERF.md` for measured results and remaining work. It has not yet achieved a competitive official score. Two experimental options, `SHOPPING_PARALLEL_DEDUP=1` and `SHOPPING_SORT_ROWS=1`, are under evaluation; the default is the verified serial event reduction. Do not assume local timings predict scorer timings.
+The program is a correctness-first native implementation. See `PERF.md` for measured results and remaining work. It has not yet achieved a competitive official score. The default uses parallel event reduction and validates rows in file order. Set `SHOPPING_SERIAL_DEDUP=1` or `SHOPPING_UNORDERED_ROWS=1` to compare alternative paths. Do not assume local timings predict scorer timings.
 

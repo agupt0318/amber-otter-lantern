@@ -41,6 +41,21 @@ fn digits(s: &[u8]) -> Option<i64> {
     })
 }
 
+#[inline]
+fn digit(byte: u8) -> Option<i64> {
+    byte.is_ascii_digit().then(|| i64::from(byte - b'0'))
+}
+
+#[inline]
+fn two(a: u8, b: u8) -> Option<i64> {
+    Some(digit(a)? * 10 + digit(b)?)
+}
+
+#[inline]
+fn four(a: u8, b: u8, c: u8, d: u8) -> Option<i64> {
+    Some(digit(a)? * 1000 + digit(b)? * 100 + digit(c)? * 10 + digit(d)?)
+}
+
 /// Convert an allowed timestamp to Unix milliseconds, with overflow rejected.
 pub fn timestamp(s: &[u8]) -> Option<i64> {
     if s.iter().all(u8::is_ascii_digit) {
@@ -52,12 +67,12 @@ pub fn timestamp(s: &[u8]) -> Option<i64> {
     if s[4] != b'-' || s[7] != b'-' || s[10] != b'T' || s[13] != b':' || s[16] != b':' {
         return None;
     }
-    let (y, m, d) = (digits(&s[0..4])?, digits(&s[5..7])?, digits(&s[8..10])?);
-    let (h, minute, sec) = (
-        digits(&s[11..13])?,
-        digits(&s[14..16])?,
-        digits(&s[17..19])?,
+    let (y, m, d) = (
+        four(s[0], s[1], s[2], s[3])?,
+        two(s[5], s[6])?,
+        two(s[8], s[9])?,
     );
+    let (h, minute, sec) = (two(s[11], s[12])?, two(s[14], s[15])?, two(s[17], s[18])?);
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
     let lengths = [
         31,
@@ -91,8 +106,8 @@ pub fn timestamp(s: &[u8]) -> Option<i64> {
         if (s[19] != b'+' && s[19] != b'-') || s[22] != b':' {
             return None;
         }
-        let oh = digits(&s[20..22])?;
-        let om = digits(&s[23..25])?;
+        let oh = two(s[20], s[21])?;
+        let om = two(s[23], s[24])?;
         if oh > 23 || om > 59 {
             return None;
         }

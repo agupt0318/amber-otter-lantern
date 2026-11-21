@@ -42,11 +42,42 @@ fn rows<const N: usize>(p: &Path, mut f: impl FnMut([&[u8]; N])) -> Result<()> {
 fn s(x: &[u8]) -> String {
     String::from_utf8_lossy(x).into_owned()
 }
-struct Candidate {
+pub struct Candidate {
     ingest: i64,
     file: usize,
     offset: usize,
     len: usize,
+}
+/// A compact, exact representation for the generator's `e`/`E` plus lowercase
+/// base-36 event IDs. Other IDs remain borrowed byte slices, so this never
+/// changes the equality rule for an input outside that common shape.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub enum EventKey<'a> {
+    Packed(u64),
+    Bytes(&'a [u8]),
+}
+impl<'a> EventKey<'a> {
+    pub fn from_bytes(id: &'a [u8]) -> Self {
+        if id.len() >= 2 && id.len() <= 12 && matches!(id[0], b'e' | b'E') {
+            let mut value = 1u64;
+            for &byte in &id[1..] {
+                let digit = match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'z' => byte - b'a' + 10,
+                    _ => return Self::Bytes(id),
+                };
+                let Some(next) = value
+                    .checked_mul(37)
+                    .and_then(|value| value.checked_add(u64::from(digit) + 1))
+                else {
+                    return Self::Bytes(id);
+                };
+                value = next;
+            }
+            return Self::Packed(value | (u64::from(id[0] == b'E') << 63));
+        }
+        Self::Bytes(id)
+    }
 }
 struct Event {
     person: usize,
@@ -197,8 +228,8 @@ fn run() -> Result<()> {
             maps.push(Some(unsafe { memmap2::Mmap::map(&file)? }))
         }
     }
-    let mut candidates: HashMap<&[u8], Candidate> = HashMap::new();
-    if env::var_os("SHOPPING_PARALLEL_DEDUP").is_none() {
+    let mut candidates: HashMap<EventKey<'_>, Candidate> = HashMap::new();
+    if env::var_os("SHOPPING_SERIAL_DEDUP").is_some() {
         for (file, map) in maps.iter().enumerate() {
             let Some(map) = map else { continue };
             let mut offset = 0usize;
@@ -217,11 +248,12 @@ fn run() -> Result<()> {
                 let Some(ingest) = parse::timestamp(r[3]) else {
                     continue;
                 };
-                if candidates.get(r[0]).is_some_and(|x| x.ingest <= ingest) {
+                let id = EventKey::from_bytes(r[0]);
+                if candidates.get(&id).is_some_and(|x| x.ingest <= ingest) {
                     continue;
                 }
                 candidates.insert(
-                    r[0],
+                    id,
                     Candidate {
                         ingest,
                         file,
@@ -233,14 +265,14 @@ fn run() -> Result<()> {
         }
     }
     let mut tables = vec![candidates];
-    if env::var_os("SHOPPING_PARALLEL_DEDUP").is_some() {
+    if env::var_os("SHOPPING_SERIAL_DEDUP").is_none() {
         tables = parallel_dedup::reduce(&maps);
     }
     stage!("event deduplication");
     let mut events = Vec::with_capacity(tables.iter().map(|t| t.len()).sum());
     let candidates = tables.into_iter().flat_map(|table| table.into_values());
     let candidates: Box<dyn Iterator<Item = Candidate>> =
-        if env::var_os("SHOPPING_SORT_ROWS").is_some() {
+        if env::var_os("SHOPPING_UNORDERED_ROWS").is_none() {
             let mut ordered: Vec<_> = candidates.collect();
             ordered.par_sort_unstable_by_key(|e| (e.file, e.offset));
             Box::new(ordered.into_iter())
@@ -286,7 +318,11 @@ fn run() -> Result<()> {
         });
     }
     drop(maps);
-    events.par_sort_unstable_by_key(|e| (e.person, e.ts));
+    if end - start <= i64::from(u32::MAX) && people.len() <= u32::MAX as usize {
+        events.par_sort_unstable_by_key(|e| ((e.person as u64) << 32) | (e.ts - start) as u64);
+    } else {
+        events.par_sort_unstable_by_key(|e| (e.person, e.ts));
+    }
     stage!("event validation and sorting");
     let mut cmap: HashMap<String, Click> = HashMap::new();
     for p in files(&data.join("clicks"))? {
@@ -443,5 +479,22 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("shopping-sessions: {e}");
         std::process::exit(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKey;
+    use std::collections::HashSet;
+
+    #[test]
+    fn event_key_is_exact_for_compact_and_fallback_ids() {
+        let ids = [b"e1".as_slice(), b"e01", b"E1", b"ezzzzzzzzzzz", b"event-1"];
+        let keys: HashSet<_> = ids.iter().map(|id| EventKey::from_bytes(id)).collect();
+        assert_eq!(keys.len(), ids.len());
+        assert!(matches!(
+            EventKey::from_bytes(b"event-1"),
+            EventKey::Bytes(_)
+        ));
     }
 }

@@ -1,4 +1,4 @@
-use crate::{parse, Candidate};
+use crate::{parse, Candidate, EventKey};
 use hashbrown::{DefaultHashBuilder, HashMap};
 use rayon::prelude::*;
 use std::{hash::BuildHasher, sync::Mutex};
@@ -6,11 +6,11 @@ use std::{hash::BuildHasher, sync::Mutex};
 /// Experimental sharded reduction. Each CSV row belongs to exactly one chunk,
 /// even if it spans a chunk boundary.
 #[allow(clippy::needless_lifetimes)] // The batch-flush closure names the mapping lifetime.
-pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<&'a [u8], Candidate>> {
+pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<EventKey<'a>, Candidate>> {
     const SHARDS: usize = 64;
     const CHUNK: usize = 2 * 1024 * 1024;
     const BATCH: usize = 256;
-    let shards: Vec<Mutex<HashMap<&[u8], Candidate>>> =
+    let shards: Vec<Mutex<HashMap<EventKey<'a>, Candidate>>> =
         (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect();
     let hash = DefaultHashBuilder::default();
     let mut tasks = Vec::new();
@@ -34,12 +34,13 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<&'a [u8], Ca
             }
             offset = (offset + 1).min(map.len());
         }
-        let mut buffers: Vec<Vec<(&[u8], Candidate)>> = (0..SHARDS).map(|_| Vec::new()).collect();
-        let flush = |shard: usize, buffer: &mut Vec<(&'a [u8], Candidate)>| {
+        let mut buffers: Vec<Vec<(EventKey<'_>, Candidate)>> =
+            (0..SHARDS).map(|_| Vec::new()).collect();
+        let flush = |shard: usize, buffer: &mut Vec<(EventKey<'a>, Candidate)>| {
             let mut table = shards[shard].lock().unwrap();
             for (id, candidate) in buffer.drain(..) {
                 if table
-                    .get(id)
+                    .get(&id)
                     .is_some_and(|old| old.ingest <= candidate.ingest)
                 {
                     continue;
@@ -63,9 +64,10 @@ pub fn reduce<'a>(maps: &'a [Option<memmap2::Mmap>]) -> Vec<HashMap<&'a [u8], Ca
             let Some(ingest) = parse::timestamp(row[3]) else {
                 continue;
             };
-            let shard = (hash.hash_one(row[0]) as usize) % SHARDS;
+            let id = EventKey::from_bytes(row[0]);
+            let shard = (hash.hash_one(id) as usize) % SHARDS;
             buffers[shard].push((
-                row[0],
+                id,
                 Candidate {
                     ingest,
                     file,

@@ -3,7 +3,8 @@ use hashbrown::HashMap;
 /// Exact, case-sensitive ID interning with component minima independent of root.
 #[derive(Default)]
 pub struct People {
-    ids: HashMap<String, usize>,
+    packed_ids: HashMap<u64, usize>,
+    other_ids: HashMap<String, usize>,
     names: Vec<String>,
     parent: Vec<usize>,
     size: Vec<usize>,
@@ -11,12 +12,28 @@ pub struct People {
 }
 
 impl People {
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
     pub fn intern(&mut self, id: &str) -> usize {
-        if let Some(&index) = self.ids.get(id) {
+        if let Some(key) = packed_id(id.as_bytes()) {
+            if let Some(&index) = self.packed_ids.get(&key) {
+                return index;
+            }
+            let index = self.names.len();
+            self.packed_ids.insert(key, index);
+            self.names.push(id.to_owned());
+            self.parent.push(index);
+            self.size.push(1);
+            self.minimum.push(index);
+            return index;
+        }
+        if let Some(&index) = self.other_ids.get(id) {
             return index;
         }
         let index = self.names.len();
-        self.ids.insert(id.to_owned(), index);
+        self.other_ids.insert(id.to_owned(), index);
         self.names.push(id.to_owned());
         self.parent.push(index);
         self.size.push(1);
@@ -61,6 +78,25 @@ impl People {
     }
 }
 
+/// Losslessly packs the common generator IDs (one prefix byte plus up to nine
+/// lowercase base-36 bytes). Anything else stays in the exact string table.
+#[inline]
+fn packed_id(id: &[u8]) -> Option<u64> {
+    if id.len() < 2 || id.len() > 10 {
+        return None;
+    }
+    let mut value = 1u64;
+    for &byte in &id[1..] {
+        let digit = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'z' => byte - b'a' + 10,
+            _ => return None,
+        };
+        value = value * 37 + u64::from(digit) + 1;
+    }
+    Some((value << 8) | u64::from(id[0]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +111,17 @@ mod tests {
         let a = p.resolve("a");
         assert_ne!(z, a);
         assert_eq!(p.canonical(a), "a");
+    }
+
+    #[test]
+    fn compact_user_ids_do_not_merge_distinct_spellings() {
+        let mut p = People::default();
+        let a = p.resolve("u1");
+        let b = p.resolve("u01");
+        let c = p.resolve("U1");
+        let d = p.resolve("u-1");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
     }
 }
