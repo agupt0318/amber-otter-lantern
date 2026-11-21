@@ -1,32 +1,12 @@
 # Shopping Sessions
 
-Native Rust implementation of the Builders Shopping Sessions track.
+This repository builds an amd64 Docker image for the Builders Shopping Sessions track. The current implementation is adapted from [Team Xero's MIT-licensed entry](https://github.com/arnabxero/xero-shopping-sessions), commit `2d5a40b`. Their copyright and license are preserved in [LICENSE](LICENSE). The previous implementation remains in this repository's Git history.
+
+The pipeline parses compact event records, partitions them by event ID for deduplication, routes survivors by person, and processes person partitions in parallel. It writes multiple Parquet parts. The Docker build targets x86-64-v3; the scorer CPU must support that instruction set.
 
 ```sh
-cargo build --release
-DATA_DIR=/path/to/input OUTPUT_DIR=/path/to/output target/release/shopping-sessions
+docker buildx build --platform linux/amd64 --load -t shopping-sessions:latest .
+IMAGE=shopping-sessions:latest scripts/docker_run.sh /path/to/data /path/to/output
 ```
 
-The executable also accepts input and output as its first two arguments for the supplied fixture harness. Set `SHOPPING_METRICS=1` for stage timings on stderr. `NCPU` controls the sort worker pool.
-
-## Verification
-
-With Python 3.12+ and Polars 2.1 installed:
-
-```sh
-cargo test --locked
-cargo build --release --locked
-python scripts/run_fixtures.py fixtures -- target/release/shopping-sessions
-python scripts/compare.py /path/to/output /path/to/dev-answer
-python tests/reference.py /path/to/small-input /path/to/output
-python tests/metamorphic.py target/release/shopping-sessions /path/to/generate
-```
-
-The reference implementation is deliberately slow and intended for small generated datasets. The fixture and output-comparison scripts come from the supplied starter kit.
-
-Build the scorer-platform image with `docker buildx build --platform linux/amd64 --load -t shopping-sessions:latest .`. Run it with `IMAGE=shopping-sessions:latest scripts/docker_run.sh /path/to/input /path/to/output`.
-
-## Performance status
-
-The program is a correctness-first native implementation. See `PERF.md` for measured results and remaining work. It has not yet achieved a competitive official score. The default uses parallel event reduction and validates rows in file order. Set `SHOPPING_SERIAL_DEDUP=1` or `SHOPPING_UNORDERED_ROWS=1` to compare alternative paths. Do not assume local timings predict scorer timings.
-
+Local verification against the preceding implementation: 36 fixtures, the published 1M dev answers inside an amd64 container, and exact logical output equality on 20M and 60M generated inputs. Local timing is not a leaderboard score. See [PERF.md](PERF.md) for prior experiments and [THIRD_PARTY_PERFORMANCE.md](THIRD_PARTY_PERFORMANCE.md) for this candidate's measurements and limitations.
