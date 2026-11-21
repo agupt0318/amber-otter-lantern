@@ -54,3 +54,7 @@ The cached-payload trial completed a 60M run in 34.54 s with 14.9 GiB peak memor
 
 The current measured stage distribution on the retained 20M run was: catalogs and links 0.406 s; event dedup 0.678 s; candidate ordering 0.250 s; validation 0.401 s; user interning and resolution 0.306 s; event sorting 0.145 s; click pipeline 0.642 s; sessionization 0.885 s; output 0.606 s. Future work should prioritize sessionization and event dedup, then test whether output page writing or catalog/link processing can be made cheaper. Language changes alone do not remove these data movement costs.
 
+## Parallel session aggregation follow-up
+
+Events and clicks are already grouped by person before sessionization. The latest change splits the event array only at person boundaries, processes those ranges on the eight workers, and sums the small campaign/day maps. It keeps the serial path for fewer than 100,000 events. Against the immediately preceding published build, alternating 20M runs were 8.760 vs 6.323 s and 7.493 vs 7.187 s (published vs parallel). On one run the session stage fell from 0.885 to 0.260 s. The 60M case completed with a 10.2 GiB peak memory footprint; its outputs matched both baseline tables exactly. Its wall time of 43.99 s was during heavy desktop contention and is not comparable to the earlier 30.01 s run. All 36 fixtures still pass.
+

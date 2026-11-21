@@ -212,6 +212,7 @@ struct CampDay {
     revenue: i64,
     assists: i64,
 }
+type Aggregates = (Vec<((usize, i32), UserDay)>, HashMap<(usize, i32), CampDay>);
 enum Col {
     Str(Vec<String>),
     Opt(Vec<Option<String>>),
@@ -246,6 +247,85 @@ fn remove_count(values: &mut Vec<(usize, usize)>, key: usize) {
     if values[index].1 == 0 {
         values.swap_remove(index);
     }
+}
+
+fn aggregate(events: &[Event], all_clicks: &[Click]) -> Aggregates {
+    let mut users = vec![];
+    let mut camps: HashMap<(usize, i32), CampDay> = HashMap::new();
+    let (mut ei, mut ci) = (0, 0);
+    while ei < events.len() {
+        let person = events[ei].person;
+        while ci < all_clicks.len() && all_clicks[ci].person < person {
+            ci += 1
+        }
+        let begin = ci;
+        while ci < all_clicks.len() && all_clicks[ci].person == person {
+            ci += 1
+        }
+        let clicks = &all_clicks[begin..ci];
+        let mut add = 0;
+        let mut active_start = 0;
+        let mut counts = vec![];
+        let mut current_day = None;
+        let mut daily = UserDay::default();
+        while ei < events.len() && events[ei].person == person {
+            let st = events[ei].ts;
+            let day = st.div_euclid(DAY) as i32;
+            let (mut last, mut count, mut revenue) = (st, 0, 0);
+            let mut cats = vec![];
+            while ei < events.len()
+                && events[ei].person == person
+                && events[ei].ts - last <= 1_800_000
+            {
+                let e = &events[ei];
+                last = e.ts;
+                count += 1;
+                revenue += e.price;
+                if e.price > 0 {
+                    add_amount(&mut cats, e.category, e.price)
+                }
+                ei += 1
+            }
+            if current_day != Some(day) {
+                if let Some(previous) = current_day {
+                    users.push(((person, previous), std::mem::take(&mut daily)));
+                }
+                current_day = Some(day);
+            }
+            daily.sessions += 1;
+            daily.events += count;
+            daily.revenue += revenue;
+            for (k, v) in cats {
+                add_amount(&mut daily.categories, k, v)
+            }
+            while add < clicks.len() && clicks[add].ts <= st {
+                add_count(&mut counts, clicks[add].campaign, 1);
+                add += 1
+            }
+            while active_start < add && clicks[active_start].ts < st - WEEK {
+                remove_count(&mut counts, clicks[active_start].campaign);
+                active_start += 1;
+            }
+            let credited = if active_start < add {
+                let ts = clicks[add - 1].ts;
+                let j = clicks.partition_point(|c| c.ts < ts);
+                clicks[j].campaign
+            } else {
+                0
+            };
+            let c = camps.entry((credited, day)).or_default();
+            c.sessions += 1;
+            c.revenue += revenue;
+            c.purchasing += i64::from(revenue > 0);
+            for &(campaign, _) in &counts {
+                camps.entry((campaign, day)).or_default().assists += 1
+            }
+        }
+        if let Some(day) = current_day {
+            users.push(((person, day), daily));
+        }
+    }
+    (users, camps)
 }
 
 fn intern_event_users(people: &mut People, pending: &[PendingEvent<'_>]) {
@@ -570,81 +650,47 @@ fn run() -> Result<()> {
     stage!("click identity resolution");
     clicks.par_sort_unstable_by(|a, b| (a.person, a.ts, &a.id).cmp(&(b.person, b.ts, &b.id)));
     stage!("click sorting");
-    let mut users = vec![];
-    let mut camps: HashMap<(usize, i32), CampDay> = HashMap::new();
-    let (mut ei, mut ci) = (0, 0);
-    while ei < events.len() {
-        let person = events[ei].person;
-        while ci < clicks.len() && clicks[ci].person < person {
-            ci += 1
-        }
-        let begin = ci;
-        while ci < clicks.len() && clicks[ci].person == person {
-            ci += 1
-        }
-        let clicks = &clicks[begin..ci];
-        let mut add = 0;
-        let mut active_start = 0;
-        let mut counts = vec![];
-        let mut current_day = None;
-        let mut daily = UserDay::default();
-        while ei < events.len() && events[ei].person == person {
-            let st = events[ei].ts;
-            let day = st.div_euclid(DAY) as i32;
-            let (mut last, mut count, mut revenue) = (st, 0, 0);
-            let mut cats = vec![];
-            while ei < events.len()
-                && events[ei].person == person
-                && events[ei].ts - last <= 1_800_000
-            {
-                let e = &events[ei];
-                last = e.ts;
-                count += 1;
-                revenue += e.price;
-                if e.price > 0 {
-                    add_amount(&mut cats, e.category, e.price)
-                }
-                ei += 1
+    let (users, camps) = if events.len() < 100_000 {
+        aggregate(&events, &clicks)
+    } else {
+        let workers = rayon::current_num_threads();
+        let mut bounds = vec![0];
+        for worker in 1..workers {
+            let mut at = events.len() * worker / workers;
+            while at < events.len() && events[at - 1].person == events[at].person {
+                at += 1;
             }
-            if current_day != Some(day) {
-                if let Some(previous) = current_day {
-                    users.push(((person, previous), std::mem::take(&mut daily)));
-                }
-                current_day = Some(day);
-            }
-            daily.sessions += 1;
-            daily.events += count;
-            daily.revenue += revenue;
-            for (k, v) in cats {
-                add_amount(&mut daily.categories, k, v)
-            }
-            while add < clicks.len() && clicks[add].ts <= st {
-                add_count(&mut counts, clicks[add].campaign, 1);
-                add += 1
-            }
-            while active_start < add && clicks[active_start].ts < st - WEEK {
-                remove_count(&mut counts, clicks[active_start].campaign);
-                active_start += 1;
-            }
-            let credited = if active_start < add {
-                let ts = clicks[add - 1].ts;
-                let j = clicks.partition_point(|c| c.ts < ts);
-                clicks[j].campaign
-            } else {
-                0
-            };
-            let c = camps.entry((credited, day)).or_default();
-            c.sessions += 1;
-            c.revenue += revenue;
-            c.purchasing += i64::from(revenue > 0);
-            for &(campaign, _) in &counts {
-                camps.entry((campaign, day)).or_default().assists += 1
+            if at < events.len() && at > *bounds.last().unwrap() {
+                bounds.push(at);
             }
         }
-        if let Some(day) = current_day {
-            users.push(((person, day), daily));
+        bounds.push(events.len());
+        let partials: Vec<_> = bounds
+            .windows(2)
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|range| {
+                let low = events[range[0]].person;
+                let high = events[range[1] - 1].person;
+                let from = clicks.partition_point(|c| c.person < low);
+                let to = clicks.partition_point(|c| c.person <= high);
+                aggregate(&events[range[0]..range[1]], &clicks[from..to])
+            })
+            .collect();
+        let mut users = vec![];
+        let mut camps: HashMap<(usize, i32), CampDay> = HashMap::new();
+        for (part_users, part_camps) in partials {
+            users.extend(part_users);
+            for (key, value) in part_camps {
+                let total = camps.entry(key).or_default();
+                total.sessions += value.sessions;
+                total.purchasing += value.purchasing;
+                total.revenue += value.revenue;
+                total.assists += value.assists;
+            }
         }
-    }
+        (users, camps)
+    };
     stage!("sessionization and attribution");
     let (mut un, mut ud, mut us, mut ue, mut ur, mut ut) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
